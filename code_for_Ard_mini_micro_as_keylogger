@@ -1,0 +1,27 @@
+#include <Keyboard.h>
+
+void setup() {
+  Keyboard.begin();
+  delay(1000);  // Let the OS recognize the device
+
+  // Open Run dialog (Windows + R)
+  Keyboard.press(KEY_LEFT_GUI);
+  Keyboard.press('r');
+  delay(100);
+  Keyboard.releaseAll();
+
+  delay(500);
+
+  // Type "cmd" and press Enter
+  Keyboard.println("cmd");
+  delay(500);
+
+  // Type the loop to echo 50 times
+  Keyboard.println("for /L %i in (1,1,50) do echo RDX is here");
+
+  Keyboard.end();
+}
+
+void loop() {
+  // Do nothing
+}
